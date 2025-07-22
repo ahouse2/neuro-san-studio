@@ -34,8 +34,10 @@ socketio = SocketIO(app)
 thread_started = False  # pylint: disable=invalid-name
 
 # Configure logging
-logging.basicConfig(level=os.environ.get("LOG_LEVEL", "INFO"))
-app.logger.setLevel(logging.getLevelName(os.environ.get("LOG_LEVEL", "INFO")))
+log_level = os.environ.get("LOG_LEVEL", "INFO").upper()
+numeric_level = getattr(logging, log_level, logging.INFO)
+logging.basicConfig(level=numeric_level)
+app.logger.setLevel(numeric_level)
 
 user_input_queue = queue.Queue()
 
@@ -158,6 +160,7 @@ from coded_tools.legal_discovery.timeline_manager import TimelineManager
 UPLOAD_FOLDER = "uploads"
 app.config["UPLOAD_FOLDER"] = UPLOAD_FOLDER
 ALLOWED_EXTENSIONS = {"pdf", "txt", "csv", "doc", "docx", "ppt", "pptx", "jpg", "jpeg", "png", "gif"}
+os.makedirs(app.config["UPLOAD_FOLDER"], exist_ok=True)
 
 
 def allowed_file(filename: str) -> bool:
@@ -180,9 +183,6 @@ def cleanup_upload_folder(max_age_hours: int = 24) -> None:
 
 @app.route("/api/upload", methods=["POST"])
 def upload_files():
-    if not os.path.exists(UPLOAD_FOLDER):
-        os.makedirs(UPLOAD_FOLDER)
-
     files = request.files.getlist("files")
 
     if not files:
