@@ -5,6 +5,7 @@ import queue
 import re
 import time
 from datetime import datetime
+import json
 
 # pylint: disable=import-error
 import schedule
@@ -38,6 +39,8 @@ logging.basicConfig(level=os.environ.get("LOG_LEVEL", "INFO"))
 app.logger.setLevel(logging.getLevelName(os.environ.get("LOG_LEVEL", "INFO")))
 
 user_input_queue = queue.Queue()
+# stores agent responses for HTTP polling endpoints
+response_queue = queue.Queue()
 
 with app.app_context():
 
@@ -101,6 +104,8 @@ def legal_discovery_thinking_process():
                     {"data": "\n".join(speeches_to_emit)},
                     namespace="/chat",
                 )
+                for speech in speeches_to_emit:
+                    response_queue.put(speech)
 
             timestamp = datetime.now().strftime("[%I:%M:%S%p]").lower()
             thoughts = f"\n{timestamp} user: " + "[Silence]"
@@ -285,14 +290,23 @@ def forensic_logs():
 
 @app.route("/api/progress", methods=["GET"])
 def progress_status():
-    """Stubbed progress information for the frontend."""
-    data = {
-        "upload": 0,
-        "export": 0,
-        "timeline": 0,
-        "forensic": 0,
+    """Return task progress percentages for the frontend."""
+    progress_path = os.path.join(app.config["UPLOAD_FOLDER"], "progress.json")
+    if os.path.exists(progress_path):
+        try:
+            with open(progress_path, "r", encoding="utf-8") as f:
+                data = json.load(f)
+        except Exception:  # pragma: no cover - malformed file
+            data = {}
+    else:
+        data = {}
+    result = {
+        "upload": data.get("upload", 0),
+        "export": data.get("export", 0),
+        "timeline": data.get("timeline", 0),
+        "forensic": data.get("forensic", 0),
     }
-    return jsonify({"status": "ok", "data": data})
+    return jsonify({"status": "ok", "data": result})
 
 
 @app.route("/api/graph/export", methods=["GET"])
@@ -366,9 +380,14 @@ def research():
 def query_agent():
     data = request.get_json() or {}
     text = data.get("text")
-    if text:
-        user_input_queue.put(text)
-    return jsonify({"status": "ok"})
+    if not text:
+        return jsonify({"error": "Missing text"}), 400
+    user_input_queue.put(text)
+    try:
+        response = response_queue.get(timeout=30)
+    except queue.Empty:
+        response = ""
+    return jsonify({"status": "ok", "data": response})
 
 
 @app.route("/api/export/report", methods=["POST"])
