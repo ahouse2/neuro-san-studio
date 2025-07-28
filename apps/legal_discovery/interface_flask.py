@@ -568,8 +568,8 @@ def export_report():
 
 @app.route("/")
 def index():
-    """Return the html."""
-    return render_template("index.html")
+    """Serve the React dashboard by default."""
+    return render_template("dashboard.html")
 
 
 @app.route("/dashboard")
