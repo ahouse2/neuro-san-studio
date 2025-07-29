@@ -585,6 +585,47 @@ def progress_status():
     return jsonify({"status": "ok", "data": data})
 
 
+@app.route("/api/metrics", methods=["GET"])
+def aggregated_metrics():
+    """Return combined counts for dashboard metrics."""
+    root = app.config["UPLOAD_FOLDER"]
+    upload_count = 0
+    if os.path.exists(root):
+        upload_count = sum(len(f) for _, _, f in os.walk(root))
+
+    vector_count = 0
+    try:
+        vector_count = VectorDatabaseManager().get_document_count()
+    except Exception:  # pragma: no cover - optional dependency may fail
+        vector_count = 0
+
+    graph_count = 0
+    try:
+        kg_manager = KnowledgeGraphManager()
+        result = kg_manager.run_query("MATCH (n) RETURN count(n) AS count")
+        graph_count = result[0]["count"] if result else 0
+        kg_manager.close()
+    except Exception:  # pragma: no cover - database may be unavailable
+        graph_count = 0
+
+    task_count = len(task_tracker.list_tasks())
+
+    log_path = os.path.join(root, "forensic.log")
+    log_count = 0
+    if os.path.exists(log_path):
+        with open(log_path, "r", encoding="utf-8", errors="ignore") as f:
+            log_count = len(f.read().splitlines())
+
+    data = {
+        "uploaded_files": upload_count,
+        "vector_docs": vector_count,
+        "graph_nodes": graph_count,
+        "task_count": task_count,
+        "forensic_logs": log_count,
+    }
+    return jsonify({"status": "ok", "data": data})
+
+
 @app.route("/api/graph/export", methods=["GET"])
 def export_graph():
     kg_manager = KnowledgeGraphManager()
