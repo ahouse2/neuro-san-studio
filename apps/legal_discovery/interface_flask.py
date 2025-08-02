@@ -3,6 +3,7 @@ import logging
 import os
 import queue
 import re
+import subprocess
 import time
 from datetime import datetime
 
@@ -21,9 +22,9 @@ from apps.legal_discovery.legal_discovery import (
     tear_down_legal_discovery_assistant,
 )
 
-from . import settings
-from .database import db
-from .models import (
+from apps.legal_discovery import settings
+from apps.legal_discovery.database import db
+from apps.legal_discovery.models import (
     Case,
     Document,
     LegalReference,
@@ -45,6 +46,15 @@ os.environ["AGENT_LLM_INFO_FILE"] = os.environ.get(
     "AGENT_LLM_INFO_FILE",
     os.path.join(BASE_DIR, "registries", "llm_config.hocon"),
 )
+# Ensure the React build exists so the dashboard can render
+STATIC_DIR = os.path.join(os.path.dirname(__file__), "static")
+BUNDLE_PATH = os.path.join(STATIC_DIR, "bundle.js")
+if not os.path.exists(BUNDLE_PATH):
+    logging.info("No frontend bundle found; running npm build")
+    subprocess.run(
+        ["npm", "--prefix", os.path.dirname(__file__), "run", "build", "--silent"],
+        check=True,
+    )
 app = Flask(__name__)
 app.config["SECRET_KEY"] = os.environ.get("FLASK_SECRET_KEY", os.urandom(24).hex())
 app.config["SQLALCHEMY_DATABASE_URI"] = "sqlite:///legal_discovery.db"
