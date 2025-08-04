@@ -462,3 +462,14 @@ pip install python-dotenv flask gunicorn pillow requests neuro-san pyvis
 - Expanded legal theory ontology with negligence, defamation, false imprisonment, intentional infliction of emotional distress, and strict products liability.
 - LegalTheoryEngine now exposes defenses and factual indicators alongside element support scores.
 - Next: implement weighted scoring and add jurisdiction-specific defenses.
+
+## Update 2025-08-04T12:30Z
+- Extended Document model with exhibit fields and added ExhibitCounter and audit log tables.
+- Introduced `exhibit_manager` service with binder generation and export helpers.
+- Added unit test covering exhibit numbering and binder creation.
+- Next: wire exhibit manager into dashboard UI and provide export controls.
+
+## Update 2025-08-04T12:45Z
+- Fixed exhibit manager test setup to avoid detached instances.
+- Simplified exhibit_manager imports and verified all tests pass.
+- Next: begin UI integration for exhibit controls.

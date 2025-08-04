@@ -126,3 +126,14 @@ WE STARTED ON #3, INSTEAD OF #1. DEAL WITH IT, FINISH IMPLEMENTING #3, AND THEN 
 - Delivered 3.5 Case Theory dashboard tab with neon element highlight
 - Next: proceed to feature #1 planning and implementation
 
+## Update 2025-08-04T12:30Z
+- Began feature #5 Exhibit & Trial Binder Creator.
+- Added exhibit fields to Document model and created ExhibitCounter and audit log tables.
+- Implemented exhibit_manager service with binder generation and export helpers.
+- Next: connect service to UI and implement comprehensive compliance checks.
+
+## Update 2025-08-04T12:45Z
+- Resolved test environment issues and confirmed binder generation works via unit tests.
+- Cleaned up exhibit manager module imports.
+- Next: build frontend controls for exhibit numbering and binder export.
+
