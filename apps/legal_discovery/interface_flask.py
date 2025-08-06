@@ -4,7 +4,6 @@ import hashlib
 import json
 import logging
 import os
-import queue
 import re
 import subprocess
 import threading
@@ -25,7 +24,6 @@ from flask import request
 from flask import send_file
 from werkzeug.utils import secure_filename
 from flask import Flask, jsonify, render_template, request, send_file
-from flask_socketio import SocketIO
 
 import spacy
 from spacy.cli import download as spacy_download
@@ -53,7 +51,6 @@ from pyhocon import ConfigFactory
 from werkzeug.utils import secure_filename
 
 from apps.legal_discovery import settings
-from coded_tools.legal_discovery import RetrievalChatAgent
 from apps.legal_discovery.database import db
 from coded_tools.legal_discovery.deposition_prep import DepositionPrep
 from apps.legal_discovery.models import (
@@ -98,6 +95,8 @@ from coded_tools.legal_discovery.bates_numbering import (
 )
 import difflib
 import fitz
+from .extensions import socketio
+from .features import FEATURES
 
 # Configure logging before any other setup so early steps are captured
 logging.basicConfig(level=os.environ.get("LOG_LEVEL", "INFO"))
@@ -136,30 +135,29 @@ app.config["SECRET_KEY"] = os.environ.get("FLASK_SECRET_KEY", os.urandom(24).hex
 app.config["SQLALCHEMY_DATABASE_URI"] = os.environ.get("DATABASE_URL", "sqlite:///legal_discovery.db")
 app.config["SQLALCHEMY_TRACK_MODIFICATIONS"] = False
 db.init_app(app)
-socketio = SocketIO(app)
+socketio.init_app(app)
 app.register_blueprint(exhibits_bp)
+
+if FEATURES["theories"]:
+    from .theories_routes import theories_bp
+
+    app.register_blueprint(theories_bp)
+if FEATURES["binder"]:
+    from .binder_routes import binder_bp
+
+    app.register_blueprint(binder_bp)
+if FEATURES["chat"]:
+    from .chat_routes import chat_bp
+
+    app.register_blueprint(chat_bp)
 executor = ThreadPoolExecutor(max_workers=int(os.environ.get("INGESTION_WORKERS", "4")))
 atexit.register(executor.shutdown)
-thread_started = False  # pylint: disable=invalid-name
 bates_service = BatesNumberingService()
 
 # Shared crawler instance for legal references
-def synthesize_voice(text: str, model: str) -> str:
-    """Generate base64-encoded audio from text."""
-    try:
-        from gtts import gTTS
-
-        audio_io = BytesIO()
-        gTTS(text=text, lang=model).write_to_fp(audio_io)
-        audio_io.seek(0)
-        return base64.b64encode(audio_io.read()).decode("utf-8")
-    except Exception:  # pragma: no cover - best effort
-        return ""
 legal_crawler = LegalCrawler()
 
 app.logger.setLevel(logging.getLevelName(os.environ.get("LOG_LEVEL", "INFO")))
-
-user_input_queue = queue.Queue()
 
 # Shared agent session and worker thread are initialized asynchronously
 legal_discovery_session = None
@@ -202,85 +200,6 @@ def reinitialize_legal_discovery_session() -> None:
         tear_down_legal_discovery_assistant(legal_discovery_session)
     legal_discovery_session, legal_discovery_thread = set_up_legal_discovery_assistant(_gather_upload_paths())
     app.logger.info("Legal discovery session reinitialized")
-
-
-def legal_discovery_thinking_process():
-    """Main permanent agent-calling loop."""
-    with app.app_context():  # Manually push the application context
-        global legal_discovery_thread  # pylint: disable=global-statement
-        thoughts = "thought: hmm, let's see now..."
-        while True:
-            socketio.sleep(1)
-            if legal_discovery_session is None:
-                continue
-
-            app.logger.debug("Calling legal_discovery_thinker...")
-            thoughts, legal_discovery_thread = legal_discovery_thinker(
-                legal_discovery_session, legal_discovery_thread, thoughts
-            )
-            app.logger.debug("...legal_discovery_thinker returned.")
-            app.logger.debug(thoughts)
-
-            # Separating thoughts and speeches
-            # Assume 'thoughts' is the string returned by legal_discovery_thinker
-
-            thoughts_to_emit = []
-            speeches_to_emit = []
-
-            # --- 1.  Slice the input into blocks ----------------------------------------
-            #     Each block begins with  "thought:"  or  "say:"  and continues until
-            #     the next block or the end of the string.
-            pattern = re.compile(
-                r"(?m)^(thought|say):[ \t]*(.*?)(?=^\s*(?:thought|say):|\Z)", re.S  # look-ahead  # dot = newline
-            )
-
-            for kind, raw in pattern.findall(thoughts):
-                content = raw.lstrip()  # drop the leading spaces/newline after the prefix
-                if not content:
-                    continue
-
-                if kind == "thought":
-                    timestamp = datetime.now().strftime("[%I:%M:%S%p]").lower()
-                    thoughts_to_emit.append(f"{timestamp} thought: {content}")
-                else:  # kind == "say"
-                    speeches_to_emit.append(content)
-
-            # --- 2.  Emit the blocks -----------------------------------------------------
-            if thoughts_to_emit:
-                socketio.emit(
-                    "update_thoughts",
-                    {"data": "\n".join(thoughts_to_emit)},
-                    namespace="/chat",
-                )
-
-            if speeches_to_emit:
-                socketio.emit(
-                    "update_speech",
-                    {"data": "\n".join(speeches_to_emit)},
-                    namespace="/chat",
-                )
-
-            timestamp = datetime.now().strftime("[%I:%M:%S%p]").lower()
-            thoughts = f"\n{timestamp} user: " + "[Silence]"
-            try:
-                user_input = user_input_queue.get(timeout=0.1)
-                if user_input:
-                    thoughts = f"\n{timestamp} user: " + user_input
-                if user_input == "exit":
-                    break
-            except queue.Empty:
-                time.sleep(0.1)
-                continue
-
-
-@socketio.on("connect", namespace="/chat")
-def on_connect():
-    """Start background task on connect."""
-    global thread_started  # pylint: disable=global-statement
-    if not thread_started:
-        thread_started = True
-        # let socketio manage the green-thread
-        socketio.start_background_task(legal_discovery_thinking_process)
 
 
 @app.route("/api/settings", methods=["GET", "POST"])
@@ -953,9 +872,6 @@ def upload_files():
 
         if batch_processed:
             reinitialize_legal_discovery_session()
-            user_input_queue.put(
-                "process all files ingested within your scope and produce a basic overview and report."
-            )
 
     return jsonify({"status": "ok", "processed": processed, "skipped": skipped})
 
@@ -1222,6 +1138,13 @@ def document_versions_diff():
             text2.splitlines(),
             fromfile=v1.bates_number,
             tofile=v2.bates_number,
+        )
+    )
+    return jsonify({"status": "ok", "diff": diff})
+
+
+@app.route("/api/document/bates", methods=["POST"])
+def bates_number_document():
     """Apply Bates numbering to a PDF and record a document version."""
     data = request.get_json() or {}
     file_path = data.get("file_path")
@@ -1699,7 +1622,6 @@ def analyze_graph():
     analyzer = GraphAnalyzer()
     try:
         results = analyzer.analyze_centrality(subnet)
-        user_input_queue.put("Provide insights on the most connected entities in the case graph.")
     except Exception as exc:  # pragma: no cover - optional analysis may fail
         app.logger.error("Graph analysis failed: %s", exc)
         return jsonify({"error": str(exc)}), 500
@@ -1812,221 +1734,8 @@ def research():
     return jsonify({"status": "ok", "data": results})
 
 
-@app.route("/api/theories/suggest", methods=["GET"])
-def suggest_theories():
-    """Return ranked legal theory candidates."""
-    engine = LegalTheoryEngine()
-    theories = engine.suggest_theories()
-    engine.close()
-    return jsonify({"status": "ok", "theories": theories})
 
 
-@app.route("/api/theories/graph", methods=["GET"])
-def theory_graph():
-    """Return graph data for a specific cause of action."""
-    cause = request.args.get("cause")
-    if not cause:
-        return jsonify({"status": "error", "error": "cause required"}), 400
-    engine = LegalTheoryEngine()
-    nodes, edges = engine.get_theory_subgraph(cause)
-    engine.close()
-    return jsonify({"status": "ok", "nodes": nodes, "edges": edges})
-
-
-@app.route("/api/theories/accept", methods=["POST"])
-def accept_theory():
-    """Pipe an accepted theory to drafting, pretrial and timeline tools."""
-
-    data = request.get_json() or {}
-    cause = data.get("cause")
-    if not cause:
-        return jsonify({"status": "error", "error": "cause required"}), 400
-
-    engine = LegalTheoryEngine()
-    try:
-        theories = engine.suggest_theories()
-        theory = next((t for t in theories if t["cause"] == cause), None)
-        if theory is None:
-            return (
-                jsonify({"status": "error", "error": "unknown cause"}),
-                404,
-            )
-
-        drafter = DocumentDrafter()
-        doc_path = os.path.join(app.config["UPLOAD_FOLDER"], f"{cause.replace(' ', '_')}_theory.docx")
-        drafter.create_document(doc_path, f"Accepted theory: {cause}")
-
-        pretrial = PretrialGenerator()
-        statement = pretrial.generate_statement(cause, [e["name"] for e in theory["elements"]])
-
-        timeline_items = []
-        for element in theory["elements"]:
-            for fact in element["facts"]:
-                for date in fact.get("dates", []):
-                    timeline_items.append({"date": date, "description": fact["text"]})
-
-        timeline_manager = TimelineManager()
-        if timeline_items:
-            timeline_manager.create_timeline(cause, timeline_items)
-
-        lt = LegalTheory.query.filter_by(theory_name=cause, case_id=1).first()
-        if lt is None:
-            lt = LegalTheory(case_id=1, theory_name=cause)
-            db.session.add(lt)
-        lt.status = "approved"
-        if data.get("comment"):
-            lt.review_comment = data.get("comment")
-        db.session.commit()
-
-        return jsonify(
-            {
-                "status": "ok",
-                "document": doc_path,
-                "pretrial": statement,
-                "timeline_items": timeline_items,
-            }
-        )
-    finally:
-        engine.close()
-
-
-@app.route("/api/pretrial/export", methods=["POST"])
-def export_pretrial_statement():
-    """Generate a pretrial statement document and update timeline/binder."""
-
-    data = request.get_json() or {}
-    case_id = data.get("case_id", type=int)
-    if not case_id:
-        return jsonify({"error": "Missing case_id"}), 400
-
-    os.makedirs("exports", exist_ok=True)
-    path = os.path.join("exports", f"pretrial_{case_id}.docx")
-    generator = PretrialGenerator()
-    generator.export(case_id, path)
-    return jsonify({"status": "ok", "path": path})
-
-
-@app.route("/api/theories/reject", methods=["POST"])
-def reject_theory():
-    data = request.get_json() or {}
-    cause = data.get("cause")
-    if not cause:
-        return jsonify({"status": "error", "error": "cause required"}), 400
-
-    lt = LegalTheory.query.filter_by(theory_name=cause, case_id=1).first()
-    if lt is None:
-        lt = LegalTheory(case_id=1, theory_name=cause)
-        db.session.add(lt)
-    lt.status = "rejected"
-    if data.get("comment"):
-        lt.review_comment = data.get("comment")
-    db.session.commit()
-    return jsonify({"status": "ok"})
-
-
-@app.route("/api/theories/comment", methods=["POST"])
-def comment_theory():
-    data = request.get_json() or {}
-    cause = data.get("cause")
-    comment = data.get("comment")
-    if not cause or comment is None:
-        return jsonify({"status": "error", "error": "cause and comment required"}), 400
-
-    lt = LegalTheory.query.filter_by(theory_name=cause, case_id=1).first()
-    if lt is None:
-        lt = LegalTheory(case_id=1, theory_name=cause)
-        db.session.add(lt)
-    lt.review_comment = comment
-    db.session.commit()
-    return jsonify({"status": "ok"})
-
-
-@app.route("/api/query", methods=["POST"])
-def query_agent():
-    data = request.get_json() or {}
-    text = data.get("text")
-    if not text:
-        return jsonify({"status": "error", "error": "text required"}), 400
-    tm = TimelineManager()
-    case_id = data.get("case_id", 1)
-    if text.lower().startswith("timeline summary"):
-        return jsonify({"status": "ok", "summary": tm.summarize(case_id)})
-    event = tm.upsert_event_from_text(text, case_id)
-    if event:
-        socketio.emit(
-            "update_speech",
-            {"data": f"Recorded event on {event['date']}"},
-            namespace="/chat",
-        )
-    user_input_queue.put(text)
-    agent = RetrievalChatAgent()
-    result = agent.query(
-        question=text,
-        sender_id=data.get("sender_id", 0),
-        conversation_id=data.get("conversation_id"),
-    )
-    if result.get("facts"):
-        socketio.emit(
-            "update_speech",
-            {"data": "\n".join(result["facts"])},
-            namespace="/chat",
-        )
-        db.session.add(
-            MessageAuditLog(
-                message_id=result["message_id"],
-                sender="assistant",
-                transcript="\n".join(result["facts"]),
-                voice_model=data.get("voice_model"),
-            )
-        )
-    db.session.add(
-        MessageAuditLog(
-            message_id=result["message_id"],
-            sender="user",
-            transcript=text,
-            voice_model=data.get("voice_model"),
-        )
-    )
-    db.session.commit()
-    return jsonify({"status": "ok", "message_id": result["message_id"]})
-
-
-@app.route("/api/voice_query", methods=["POST"])
-def voice_query():
-    data = request.get_json() or {}
-    transcript = data.get("transcript")
-    if not transcript:
-        return jsonify({"status": "error", "error": "transcript required"}), 400
-    user_input_queue.put(transcript)
-    agent = RetrievalChatAgent()
-    result = agent.query(
-        question=transcript,
-        sender_id=data.get("sender_id", 0),
-        conversation_id=data.get("conversation_id"),
-    )
-    response_text = "\n".join(result.get("facts", []))
-    if response_text:
-        socketio.emit("update_speech", {"data": response_text}, namespace="/chat")
-        audio = synthesize_voice(response_text, data.get("voice_model", "en-US"))
-        socketio.emit("voice_output", {"audio": audio}, namespace="/chat")
-        db.session.add(
-            MessageAuditLog(
-                message_id=result["message_id"],
-                sender="assistant",
-                transcript=response_text,
-                voice_model=data.get("voice_model"),
-            )
-        )
-    db.session.add(
-        MessageAuditLog(
-            message_id=result["message_id"],
-            sender="user",
-            transcript=transcript,
-            voice_model=data.get("voice_model"),
-        )
-    )
-    db.session.commit()
-    return jsonify({"status": "ok", "message_id": result["message_id"]})
 
 
 @app.route("/api/export/report", methods=["POST"])
@@ -2053,18 +1762,6 @@ def index():
 def dashboard():
     """Return the dashboard UI."""
     return render_template("dashboard.html")
-
-
-@socketio.on("user_input", namespace="/chat")
-def handle_user_input(json, *_):
-    """
-    Handles user input.
-
-    :param json: A json object
-    """
-    user_input = json["data"]
-    user_input_queue.put(user_input)
-    socketio.emit("update_user_input", {"data": user_input}, namespace="/chat")
 
 
 def cleanup():
