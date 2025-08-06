@@ -733,3 +733,8 @@ pip install python-dotenv flask gunicorn pillow requests neuro-san pyvis
 - Enabled chat-driven timeline updates with cross-links to depositions, exhibits and theories, plus summary endpoint and blur styling.
 - Next: broaden natural language date parsing and display linked events in dashboard.
 
+## Update 2025-08-10T00:00Z
+- Split interface_flask into blueprints for theories, binder and chat with feature toggles.
+- Added routing tests for each blueprint and updated chat endpoints.
+- Next: expand blueprint pattern to remaining modules and document toggle usage.
+
